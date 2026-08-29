@@ -1,0 +1,7 @@
+.{
+    .name = .type_chimpanzee,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.16.0",
+    .paths = .{""},
+    .fingerprint = 0xe9a80962a1b7de6,
+}
