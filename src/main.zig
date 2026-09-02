@@ -125,7 +125,7 @@ pub fn main(init: std.process.Init) !void {
                 c.cur_line += 1;
                 c.cur_word = 0;
                 c.cursor_idx = 0;
-                print("\r\n", .{});
+                // print("\r\n", .{}); // keep old lines
             } else if (c.cur_word == l.len - 1 and c.cur_line == c.lines.len - 1) {
                 is_done = true;
             }
