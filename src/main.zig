@@ -1,14 +1,33 @@
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 
 const seq_clear_line = "\x1b[2K";
 const seq_refresh = "\x1b[2J";
 const seq_move_forward = "\x1b[2J";
-// const seq_green = "\x1b[32m";
+
+const seq_green = "\x1b[32m";
+// const seq_blue = "\x1b[33m";
 const seq_red = "\x1b[31m";
 const seq_gray = "\x1b[90m";
+const seq_bg_yellow = "\x1b[43m";
+
 const seq_reset = "\x1b[0m";
+const seq_bold = "\x1b[22m";
+
+// required width of terminal
+const MIN_WIDTH = 90;
+// count of lines in challenge
+const LINES = 20;
+// count of workds in line
+const WORDS_IN_LINE = 10;
+// length of the challenge
+const CHALLENGE_MILLISECONDS = 30_000;
+
+const word_list = @import("words.zig").word_list;
+
+var is_done = false;
 
 const Word = struct {
     str: []const u8,
@@ -21,9 +40,21 @@ const Word = struct {
 };
 
 const Challenge = struct {
-    words: []Word,
-    index: usize,
-    cursor_idx: usize,
+    lines: [][]Word,
+    cur_word: usize, // current word position in line
+    cur_line: usize, // current line
+    cursor_idx: usize, // cursor for terminal
+    time: i64,
+
+    pub fn init(lines: [][]Word) Challenge {
+        return Challenge{
+            .lines = lines,
+            .cur_line = 0,
+            .cur_word = 0,
+            .cursor_idx = 0,
+            .time = 0,
+        };
+    }
 };
 
 var stdout_writer: *std.Io.Writer = undefined;
@@ -50,22 +81,23 @@ pub fn main(init: std.process.Init) !void {
     try enableRawMode();
     defer disableRawMode();
 
-    print("ESC or Ctrl+C to quit.\n\r", .{});
+    print("{s}{s}(:3 Type Chimpanzee{s} ESC or Ctrl+C to quit.\n\n\r", .{ seq_bg_yellow, seq_gray, seq_reset });
 
-    var words: [10]Word = undefined;
-    try genWords(init.io, &words);
+    var words_buf: [LINES][WORDS_IN_LINE]Word = undefined;
+    var lines: [LINES][]Word = undefined;
+    try genWords(init.io, &lines, &words_buf);
 
-    var c = Challenge{
-        .words = &words,
-        .index = 0,
-        .cursor_idx = 0,
-    };
+    var c = Challenge.init(&lines);
 
-    while (true) {
+    const start_ms = getMs(io);
+    var time: i64 = start_ms;
+
+    while (!is_done) {
         renderLine(c);
         moveCursorForward(c.cursor_idx);
 
-        var t = &c.words[c.index];
+        const l = c.lines[c.cur_line];
+        var w = &l[c.cur_word];
         var bytebuf: [1]u8 = undefined;
         try stdin_reader.readSliceAll(&bytebuf);
         const typed = bytebuf[0];
@@ -75,40 +107,63 @@ pub fn main(init: std.process.Init) !void {
             break;
         } else if (typed == '\x08' or typed == '\x7f') {
             //backspace
-            if (t.typed_count > 0) {
-                t.typed_count -= 1;
-                t.typed[t.typed_count] = '\x00';
+            if (w.typed_count > 0) {
+                w.typed_count -= 1;
+                w.typed[w.typed_count] = '\x00';
                 c.cursor_idx -= 1;
-            } else if (c.index > 0) {
-                c.index -= 1;
+            } else if (c.cur_word > 0) {
+                c.cur_word -= 1;
                 c.cursor_idx -= 2;
             }
-
-            continue;
-        } else if (typed == ' ' and c.index < c.words.len - 1) {
-            c.cursor_idx += t.str.len + 2 - t.typed_count;
-            c.index += 1;
-            continue;
+        } else if (typed == ' ' or typed == '\r') {
+            w.typed[w.typed_count + 1] = '\x00';
+            if (c.cur_word < l.len - 1) {
+                c.cursor_idx += w.str.len + 2 - w.typed_count;
+                c.cur_word += 1;
+            } else if (c.cur_word == l.len - 1 and c.cur_line < c.lines.len - 1) {
+                // next line
+                c.cur_line += 1;
+                c.cur_word = 0;
+                c.cursor_idx = 0;
+                print("\r\n", .{});
+            } else if (c.cur_word == l.len - 1 and c.cur_line == c.lines.len - 1) {
+                is_done = true;
+            }
         } else if ('a' <= typed and typed <= 'z') {
-            if (t.typed_count <= t.str.len) {
-                t.typed[t.typed_count] = typed;
-                t.typed[t.typed_count + 1] = '\x00';
-                t.typed_count += 1;
+            if (w.typed_count <= w.str.len) {
+                w.typed[w.typed_count] = typed;
+                w.typed[w.typed_count + 1] = '\x00';
+                w.typed_count += 1;
                 c.cursor_idx += 1;
             } else {
-                t.typed[t.str.len] = typed;
-                t.typed[t.str.len + 1] = '\x00';
+                w.typed[w.str.len] = typed;
+                w.typed[w.str.len + 1] = '\x00';
             }
         }
+        time = getMs(io) - start_ms;
+
+        if (time > CHALLENGE_MILLISECONDS) {
+            is_done = true;
+        }
+    }
+
+    if (is_done) {
+        c.time = time;
+        showResult(c);
+        try io.sleep(.fromSeconds(2), .awake);
+    } else {
+        print("\n\rBye!!\n", .{});
     }
 }
 
 fn renderLine(c: Challenge) void {
     print("\r{s}", .{seq_clear_line});
-    for (c.words, 0..) |w, i| {
+
+    const line = c.lines[c.cur_line];
+    for (line, 0..) |w, i| {
         renderWord(w);
 
-        if (c.words.len + 1 != i) {
+        if (line.len + 1 != i) {
             print(" ", .{});
         }
     }
@@ -136,12 +191,6 @@ fn renderWord(word: Word) void {
         print(" ", .{});
     }
 }
-
-// pub fn moveCursor(row: u8, col: u8) void {
-//     _ = row;
-//     // print("\x1b[{d};{d}H", .{ row, col });
-//     print("\x1b[;{d}H", .{col});
-// }
 
 pub fn moveCursorForward(n: usize) void {
     if (n > 0) {
@@ -202,25 +251,19 @@ pub fn disableRawMode() void {
     ) catch {};
 }
 
-fn genWords(io: std.Io, words: []Word) !void {
+fn genWords(io: std.Io, lines: [][]Word, words_buf: [][WORDS_IN_LINE]Word) !void {
     var r: std.Random.IoSource = .{ .io = io };
 
-    for (0..words.len) |i| {
-        const random = r.interface().uintAtMost(usize, word_list.len - 1);
+    for (0..LINES) |i| {
+        for (0..WORDS_IN_LINE) |j| {
+            const random = r.interface().uintAtMost(usize, word_list.len - 1);
 
-        words[i].str = word_list[random];
-        words[i].typed = undefined;
-        words[i].typed_count = 0;
+            words_buf[i][j] = Word.init(word_list[random]);
+        }
+
+        lines[i] = &words_buf[i];
     }
 }
-
-const word_list = [_][]const u8{
-    "test",
-    "word",
-    "keyboard",
-    "and",
-    "otherwise",
-};
 
 fn checkWinSize() !void {
     const posix = std.posix;
@@ -231,7 +274,7 @@ fn checkWinSize() !void {
 
     if (posix.errno(err) == .SUCCESS) {
         // std.debug.print("Width: {d}, Height: {d}\n", .{ ws.ws_col, ws.ws_row });
-        if (ws.col < 90) {
+        if (ws.col < MIN_WIDTH) {
             std.debug.print("The terminal size is too narrow to play this.\n", .{});
             return error.WinSizeTooSmall;
         }
@@ -239,4 +282,43 @@ fn checkWinSize() !void {
         std.debug.print("Failed to get terminal size.\n", .{});
         return error.FailedToGetWinSize;
     }
+}
+
+fn showResult(c: Challenge) void {
+    var correct: usize = 0;
+    var mistakes: usize = 0;
+
+    for (c.lines) |l| {
+        for (l) |w| {
+            for (w.typed, 0..) |t, i| {
+                if (w.typed_count == 0) continue;
+
+                if (t == '\x00') continue;
+
+                if (i < w.str.len) {
+                    if (t == w.str[i]) {
+                        correct += 1;
+                    } else {
+                        mistakes += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    var accuracy: usize = 0;
+    const typed = correct + mistakes;
+    if (typed > 0) {
+        accuracy = 100 * correct / typed;
+    }
+
+    print("\n\r{s}Accuracy:{s} {d}% (Correct: {d} Mistakes: {d})", .{ seq_green, seq_reset, accuracy, correct, mistakes });
+
+    const wpm: usize = @intCast(60_000 * typed / 5 / @as(u64, @intCast(c.time)));
+
+    print("\n\r{s}WPM:{s}      {d}\r\n", .{ seq_green, seq_reset, wpm });
+}
+
+fn getMs(io: Io) i64 {
+    return Io.Clock.now(.awake, io).toMilliseconds();
 }
