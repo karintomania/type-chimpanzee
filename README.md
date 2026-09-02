@@ -1,7 +1,8 @@
 # (:3 Type Chimpanzee
 Type Chimpanzee is a minimal CLI typing test.
 
-<img width="1461" height="901" alt="play" src="https://github.com/user-attachments/assets/6e4ac229-4aa5-4f6e-a4c2-1a64aaaed818" />
+<img width="789" height="352" alt="demo" src="https://github.com/user-attachments/assets/93bf987b-4230-4bcc-9262-c406c1236caf" />
+
 
 
 ## Get Started
