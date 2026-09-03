@@ -112,8 +112,17 @@ pub fn main(init: std.process.Init) !void {
                 w.typed[w.typed_count] = '\x00';
                 c.cursor_idx -= 1;
             } else if (c.cur_word > 0) {
-                c.cur_word -= 1;
+                // spaces between words
                 c.cursor_idx -= 2;
+
+                // if the previous word isn't fully typed
+                const prev_w = l[c.cur_word - 1];
+                if (prev_w.str.len > prev_w.typed_count) {
+                    const adjust = prev_w.str.len - prev_w.typed_count;
+                    c.cursor_idx -= adjust;
+                }
+
+                c.cur_word -= 1;
             }
         } else if (typed == ' ' or typed == '\r') {
             w.typed[w.typed_count + 1] = '\x00';
