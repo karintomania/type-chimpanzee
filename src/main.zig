@@ -13,6 +13,9 @@ const seq_red = "\x1b[31m";
 const seq_gray = "\x1b[90m";
 const seq_bg_yellow = "\x1b[43m";
 
+const seq_hide_cursor = "\x1b[?25l";
+const seq_show_cursor = "\x1b[?25h";
+
 const seq_reset = "\x1b[0m";
 const seq_bold = "\x1b[22m";
 
@@ -59,11 +62,16 @@ const Challenge = struct {
 
 var stdout_writer: *std.Io.Writer = undefined;
 
+var io: Io = undefined;
+
 pub fn main(init: std.process.Init) !void {
-    const io = init.io;
+    io = init.io;
     const arena = init.arena;
     defer arena.deinit();
     // const gpa = init.gpa;
+    //
+    var log_buf: [2048]u8 = undefined;
+    logger = try Logger.init(&log_buf, false);
 
     checkWinSize() catch |e| switch (e) {
         error.WinSizeTooSmall => std.process.exit(1),
@@ -85,19 +93,27 @@ pub fn main(init: std.process.Init) !void {
 
     var words_buf: [LINES][WORDS_IN_LINE]Word = undefined;
     var lines: [LINES][]Word = undefined;
-    try genWords(init.io, &lines, &words_buf);
+    try genWords(&lines, &words_buf);
 
     var c = Challenge.init(&lines);
 
-    const start_ms = getMs(io);
+    const start_ms = getMs();
     var time: i64 = start_ms;
 
     while (!is_done) {
-        renderLine(c);
-        moveCursorForward(c.cursor_idx);
-
         const l = c.lines[c.cur_line];
         var w = &l[c.cur_word];
+
+        print("\r{s}", .{seq_hide_cursor});
+        if (c.cur_word == 0 and w.typed_count == 0) {
+            renderLineInitial(c);
+        } else {
+            renderLineDiff(c);
+        }
+        print("\r{s}", .{seq_show_cursor});
+
+        moveCursorForward(c.cursor_idx);
+
         var bytebuf: [1]u8 = undefined;
         try stdin_reader.readSliceAll(&bytebuf);
         const typed = bytebuf[0];
@@ -149,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
                 w.typed[w.str.len + 1] = '\x00';
             }
         }
-        time = getMs(io) - start_ms;
+        time = getMs() - start_ms;
 
         if (time > CHALLENGE_MILLISECONDS) {
             is_done = true;
@@ -159,20 +175,37 @@ pub fn main(init: std.process.Init) !void {
     if (is_done) {
         c.time = time;
         showResult(c);
-        try io.sleep(.fromSeconds(2), .awake);
+        try io.sleep(.fromSeconds(1), .awake);
     } else {
         print("\n\rBye!!\n", .{});
     }
 }
 
-fn renderLine(c: Challenge) void {
+// print all lines first
+fn renderLineInitial(c: Challenge) void {
+    // initial render
     print("\r{s}", .{seq_clear_line});
 
     const line = c.lines[c.cur_line];
-    for (line, 0..) |w, i| {
+    for (line) |w| {
         renderWord(w);
 
-        if (line.len + 1 != i) {
+        print(" ", .{});
+    }
+
+    print("\r", .{});
+}
+
+fn renderLineDiff(c: Challenge) void {
+    print("\r", .{});
+
+    const line = c.lines[c.cur_line];
+    for (line, 0..) |w, i| {
+        if (i < c.cur_word) {
+            moveCursorForward(w.str.len + 2);
+        } else if (i == c.cur_word) {
+            logger.log("print", .{});
+            renderWord(w);
             print(" ", .{});
         }
     }
@@ -181,6 +214,8 @@ fn renderLine(c: Challenge) void {
 }
 
 fn renderWord(word: Word) void {
+    // mock delays in slower PC
+    // io.sleep(.fromMilliseconds(20), .awake) catch {};
     for (word.str, 0..) |c, i| {
         if (i < word.typed_count) {
             if (c == word.typed[i]) {
@@ -260,7 +295,7 @@ pub fn disableRawMode() void {
     ) catch {};
 }
 
-fn genWords(io: std.Io, lines: [][]Word, words_buf: [][WORDS_IN_LINE]Word) !void {
+fn genWords(lines: [][]Word, words_buf: [][WORDS_IN_LINE]Word) !void {
     var r: std.Random.IoSource = .{ .io = io };
 
     for (0..LINES) |i| {
@@ -328,6 +363,35 @@ fn showResult(c: Challenge) void {
     print("\n\r{s}WPM:{s}      {d}\r\n", .{ seq_green, seq_reset, wpm });
 }
 
-fn getMs(io: Io) i64 {
+fn getMs() i64 {
     return Io.Clock.now(.awake, io).toMilliseconds();
 }
+
+var f_writer: Io.File.Writer = undefined;
+var logger: Logger = undefined;
+
+const Logger = struct {
+    writer: *Io.Writer,
+    enabled: bool,
+
+    fn init(buf: []u8, enabled: bool) !Logger {
+        const f = try std.Io.Dir.cwd().openFile(io, "./tc.log", .{ .mode = .write_only });
+        f_writer = f.writer(io, buf);
+
+        return Logger{ .writer = &f_writer.interface, .enabled = enabled };
+    }
+
+    fn log(l: *Logger, comptime fmt: []const u8, args: anytype) void {
+        if (!l.enabled) return;
+
+        l.log_inner(fmt, args) catch |e| {
+            std.debug.print("log failed: {}", .{e});
+        };
+    }
+
+    fn log_inner(l: *Logger, comptime fmt: []const u8, args: anytype) !void {
+        try l.writer.print(fmt, args);
+        try l.writer.print("\n", .{});
+        try l.writer.flush();
+    }
+};
