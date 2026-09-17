@@ -28,6 +28,8 @@ const WORDS_IN_LINE = 10;
 // length of the challenge
 const CHALLENGE_MILLISECONDS = 30_000;
 
+const ENABLE_LOG = false;
+
 const word_list = @import("words.zig").word_list;
 
 var is_done = false;
@@ -68,10 +70,9 @@ pub fn main(init: std.process.Init) !void {
     io = init.io;
     const arena = init.arena;
     defer arena.deinit();
-    // const gpa = init.gpa;
-    //
+
     var log_buf: [2048]u8 = undefined;
-    logger = try Logger.init(&log_buf, false);
+    logger = try Logger.init(&log_buf, ENABLE_LOG);
 
     checkWinSize() catch |e| switch (e) {
         error.WinSizeTooSmall => std.process.exit(1),
@@ -104,15 +105,16 @@ pub fn main(init: std.process.Init) !void {
         const l = c.lines[c.cur_line];
         var w = &l[c.cur_word];
 
-        print("\r{s}", .{seq_hide_cursor});
+        print("{s}", .{seq_hide_cursor});
         if (c.cur_word == 0 and w.typed_count == 0) {
             renderLineInitial(c);
         } else {
             renderLineDiff(c);
         }
-        print("\r{s}", .{seq_show_cursor});
 
         moveCursorForward(c.cursor_idx);
+
+        print("{s}", .{seq_show_cursor});
 
         var bytebuf: [1]u8 = undefined;
         try stdin_reader.readSliceAll(&bytebuf);
@@ -204,7 +206,6 @@ fn renderLineDiff(c: Challenge) void {
         if (i < c.cur_word) {
             moveCursorForward(w.str.len + 2);
         } else if (i == c.cur_word) {
-            logger.log("print", .{});
             renderWord(w);
             print(" ", .{});
         }
@@ -216,6 +217,7 @@ fn renderLineDiff(c: Challenge) void {
 fn renderWord(word: Word) void {
     // mock delays in slower PC
     // io.sleep(.fromMilliseconds(20), .awake) catch {};
+
     for (word.str, 0..) |c, i| {
         if (i < word.typed_count) {
             if (c == word.typed[i]) {
@@ -247,6 +249,7 @@ fn print(comptime fmt: []const u8, args: anytype) void {
         std.debug.print("{}", .{e});
     };
 
+    // TODO: optimise flush
     stdout_writer.flush() catch |e| {
         std.debug.print("{}", .{e});
     };
@@ -371,11 +374,17 @@ var f_writer: Io.File.Writer = undefined;
 var logger: Logger = undefined;
 
 const Logger = struct {
-    writer: *Io.Writer,
+    writer: ?*Io.Writer,
     enabled: bool,
 
     fn init(buf: []u8, enabled: bool) !Logger {
-        const f = try std.Io.Dir.cwd().openFile(io, "./tc.log", .{ .mode = .write_only });
+        if (!enabled) {
+            return Logger{ .writer = null, .enabled = false };
+        }
+
+        const tmp_dir = try std.Io.Dir.openDirAbsolute(io, "/tmp", .{});
+        const f = try tmp_dir.createFile(io, "./tc.log", .{ .truncate = false, .permissions = .default_file });
+        // const f = try std.Io.Dir.cwd().openFile(io, "./tc.log", .{ .mode = .write_only });
         f_writer = f.writer(io, buf);
 
         return Logger{ .writer = &f_writer.interface, .enabled = enabled };
@@ -390,8 +399,10 @@ const Logger = struct {
     }
 
     fn log_inner(l: *Logger, comptime fmt: []const u8, args: anytype) !void {
-        try l.writer.print(fmt, args);
-        try l.writer.print("\n", .{});
-        try l.writer.flush();
+        if (l.writer) |w| {
+            try w.print(fmt, args);
+            try w.print("\n", .{});
+            try w.flush();
+        }
     }
 };
