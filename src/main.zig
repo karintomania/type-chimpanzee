@@ -30,9 +30,9 @@ const CHALLENGE_MILLISECONDS = 30_000;
 
 const ENABLE_LOG = false;
 
-const word_list = @import("words.zig").word_list;
+const ChallengeState = enum { initialized, started, stopped, timed_out };
 
-var is_done = false;
+const word_list = @import("words.zig").word_list;
 
 const Word = struct {
     str: []const u8,
@@ -49,7 +49,8 @@ const Challenge = struct {
     cur_word: usize, // current word position in line
     cur_line: usize, // current line
     cursor_idx: usize, // cursor for terminal
-    time: i64,
+    state: ChallengeState,
+    stdout_locked: bool,
 
     pub fn init(lines: [][]Word) Challenge {
         return Challenge{
@@ -57,8 +58,13 @@ const Challenge = struct {
             .cur_line = 0,
             .cur_word = 0,
             .cursor_idx = 0,
-            .time = 0,
+            .state = .initialized,
+            .stdout_locked = false,
         };
+    }
+
+    pub fn is_done(self: Challenge) bool {
+        return self.state == .stopped or self.state == .timed_out;
     }
 };
 
@@ -90,22 +96,33 @@ pub fn main(init: std.process.Init) !void {
     try enableRawMode();
     defer disableRawMode();
 
-    print("{s}{s}(:3 Type Chimpanzee{s} ESC or Ctrl+C to quit.\n\n\r", .{ seq_bg_yellow, seq_gray, seq_reset });
+    // render initial
+    print("{s}{s}(:3 Type Chimpanzee{s} Start typing to begin. ESC or Ctrl+C to quit.\n\n\r", .{ seq_bg_yellow, seq_gray, seq_reset });
 
+    renderTime(@divExact(CHALLENGE_MILLISECONDS, 1000), 0);
+
+    // init challenge
     var words_buf: [LINES][WORDS_IN_LINE]Word = undefined;
     var lines: [LINES][]Word = undefined;
     try genWords(&lines, &words_buf);
 
     var c = Challenge.init(&lines);
 
-    const start_ms = getMs();
-    var time: i64 = start_ms;
+    var timer = Timer.init(&c);
+    var timer_loop = io.async(runTimerLoop, .{&timer});
+    defer timer_loop.cancel(io);
 
-    while (!is_done) {
+    while (!c.is_done()) {
         const l = c.lines[c.cur_line];
         var w = &l[c.cur_word];
 
+        if (c.stdout_locked == true) {
+            io.sleep(.fromMilliseconds(10), .awake) catch {};
+        }
+
+        c.stdout_locked = true;
         print("{s}", .{seq_hide_cursor});
+
         if (c.cur_word == 0 and w.typed_count == 0) {
             renderLineInitial(c);
         } else {
@@ -115,13 +132,18 @@ pub fn main(init: std.process.Init) !void {
         moveCursorForward(c.cursor_idx);
 
         print("{s}", .{seq_show_cursor});
+        c.stdout_locked = false;
 
+        // wait for the input
         var bytebuf: [1]u8 = undefined;
         try stdin_reader.readSliceAll(&bytebuf);
         const typed = bytebuf[0];
 
+        if (c.state == .initialized) c.state = .started;
+
         if (typed == '\x03' or typed == '\x1b') {
             // ESC or Ctrl+C
+            c.state = .stopped;
             break;
         } else if (typed == '\x08' or typed == '\x7f') {
             //backspace
@@ -154,7 +176,8 @@ pub fn main(init: std.process.Init) !void {
                 c.cursor_idx = 0;
                 // print("\r\n", .{}); // keep old lines
             } else if (c.cur_word == l.len - 1 and c.cur_line == c.lines.len - 1) {
-                is_done = true;
+                // exhaust all words (not likely happen)
+                c.state = .timed_out;
             }
         } else if ('a' <= typed and typed <= 'z') {
             if (w.typed_count <= w.str.len) {
@@ -167,20 +190,70 @@ pub fn main(init: std.process.Init) !void {
                 w.typed[w.str.len + 1] = '\x00';
             }
         }
-        time = getMs() - start_ms;
-
-        if (time > CHALLENGE_MILLISECONDS) {
-            is_done = true;
-        }
     }
 
-    if (is_done) {
-        c.time = time;
-        showResult(c);
+    if (c.state == .timed_out) {
+        showResult(c, timer.time_spent);
         try io.sleep(.fromSeconds(1), .awake);
     } else {
-        print("\n\rBye!!\n", .{});
+        print("\n\rBye!!\r\n", .{});
     }
+}
+
+const Timer = struct {
+    start_ms: i64,
+    time_spent: i64,
+    c: *Challenge,
+
+    fn init(c: *Challenge) Timer {
+        return Timer{
+            .start_ms = 0,
+            .time_spent = 0,
+            .c = c,
+        };
+    }
+};
+pub fn runTimerLoop(self: *Timer) void {
+    var current_time: usize = @divExact(CHALLENGE_MILLISECONDS, 1000);
+    while (!self.c.is_done()) {
+        io.sleep(.fromMilliseconds(50), .awake) catch {};
+
+        // wait until started state
+        if (self.c.state == .started and !self.c.stdout_locked) {
+            if (self.start_ms == 0) self.start_ms = getMs();
+
+            self.time_spent = getMs() - self.start_ms;
+
+            const time = @divFloor(
+                CHALLENGE_MILLISECONDS - @min(@as(usize, @intCast(self.time_spent)), CHALLENGE_MILLISECONDS),
+                1000,
+            );
+
+            if (time > 0 and time == current_time) continue;
+
+            current_time = time;
+
+            self.c.stdout_locked = true;
+            renderTime(current_time, self.c.cursor_idx);
+            self.c.stdout_locked = false;
+
+            if (self.time_spent > CHALLENGE_MILLISECONDS) {
+                self.c.state = .timed_out;
+                return;
+            }
+        }
+    }
+}
+
+fn renderTime(time: usize, cursor_idx: usize) void {
+    print("{s}", .{seq_hide_cursor});
+    print("\r\x1b[A{s}{d}s\x1b[B\r", .{ seq_clear_line, time });
+    moveCursorForward(cursor_idx);
+    print("{s}", .{seq_show_cursor});
+}
+
+fn getMs() i64 {
+    return Io.Clock.now(.awake, io).toMilliseconds();
 }
 
 // print all lines first
@@ -331,7 +404,7 @@ fn checkWinSize() !void {
     }
 }
 
-fn showResult(c: Challenge) void {
+fn showResult(c: Challenge, time: i64) void {
     var correct: usize = 0;
     var mistakes: usize = 0;
 
@@ -361,13 +434,9 @@ fn showResult(c: Challenge) void {
 
     print("\n\r{s}Accuracy:{s} {d}% (Correct: {d} Mistakes: {d})", .{ seq_green, seq_reset, accuracy, correct, mistakes });
 
-    const wpm: usize = @intCast(60_000 * typed / 5 / @as(u64, @intCast(c.time)));
+    const wpm: usize = @intCast(60_000 * typed / 5 / @as(u64, @intCast(time)));
 
     print("\n\r{s}WPM:{s}      {d}\r\n", .{ seq_green, seq_reset, wpm });
-}
-
-fn getMs() i64 {
-    return Io.Clock.now(.awake, io).toMilliseconds();
 }
 
 var f_writer: Io.File.Writer = undefined;
