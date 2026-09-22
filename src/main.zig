@@ -26,7 +26,7 @@ const LINES = 20;
 // count of workds in line
 const WORDS_IN_LINE = 10;
 // length of the challenge
-const CHALLENGE_MILLISECONDS = 30_000;
+const CHALLENGE_MILLISECONDS = 10_000;
 
 const ENABLE_LOG = false;
 
@@ -98,12 +98,16 @@ pub fn main(init: std.process.Init) !void {
 
     var c = Challenge.init(&lines);
 
-    const start_ms = getMs();
-    var time: i64 = start_ms;
+    var timer = Timer.init(&c.cursor_idx);
+    var timer_loop = io.async(runTimerLoop, .{&timer});
+    defer timer_loop.cancel(io);
 
     while (!is_done) {
         const l = c.lines[c.cur_line];
         var w = &l[c.cur_word];
+
+        // lock the stdout
+        timer.stdout_locked = true;
 
         print("{s}", .{seq_hide_cursor});
         if (c.cur_word == 0 and w.typed_count == 0) {
@@ -115,6 +119,8 @@ pub fn main(init: std.process.Init) !void {
         moveCursorForward(c.cursor_idx);
 
         print("{s}", .{seq_show_cursor});
+        // unlock the stdout
+        timer.stdout_locked = false;
 
         var bytebuf: [1]u8 = undefined;
         try stdin_reader.readSliceAll(&bytebuf);
@@ -167,20 +173,68 @@ pub fn main(init: std.process.Init) !void {
                 w.typed[w.str.len + 1] = '\x00';
             }
         }
-        time = getMs() - start_ms;
 
-        if (time > CHALLENGE_MILLISECONDS) {
-            is_done = true;
-        }
+        is_done = timer.is_done;
     }
 
     if (is_done) {
-        c.time = time;
+        c.time = timer.time_spent;
         showResult(c);
         try io.sleep(.fromSeconds(1), .awake);
     } else {
         print("\n\rBye!!\n", .{});
     }
+}
+
+const Timer = struct {
+    start_ms: i64,
+    time_spent: i64,
+    stdout_locked: bool, // true when main process is printing
+    challenge_cursor_idx: *usize, // pointer of c.cursor_idx
+    is_done: bool,
+
+    fn init(challenge_cursor_idx: *usize) Timer {
+        return Timer{
+            .start_ms = getMs(),
+            .time_spent = 0,
+            .stdout_locked = false,
+            .challenge_cursor_idx = challenge_cursor_idx,
+            .is_done = false,
+        };
+    }
+};
+
+fn runTimerLoop(self: *Timer) void {
+    while (true) {
+        if (!self.stdout_locked) {
+            self.time_spent = getMs() - self.start_ms;
+
+            if (self.time_spent > CHALLENGE_MILLISECONDS) {
+                self.is_done = true;
+                return;
+            }
+
+            renderTime(
+                @divFloor(
+                    CHALLENGE_MILLISECONDS - @as(usize, @intCast(self.time_spent)),
+                    1000,
+                ) + 1,
+                self.challenge_cursor_idx.*,
+            );
+        }
+        io.sleep(.fromMilliseconds(10), .awake) catch {};
+    }
+}
+
+fn renderTime(time: usize, cursor_idx: usize) void {
+    print("{s}", .{seq_hide_cursor});
+    print("\r\x1b[A{s}{d}\x1b[B\r", .{ seq_clear_line, time });
+    moveCursorForward(cursor_idx);
+    print("{s}", .{seq_show_cursor});
+}
+
+fn getMs() i64 {
+    return Io.Clock.now(.awake, io).toMilliseconds();
 }
 
 // print all lines first
@@ -364,10 +418,6 @@ fn showResult(c: Challenge) void {
     const wpm: usize = @intCast(60_000 * typed / 5 / @as(u64, @intCast(c.time)));
 
     print("\n\r{s}WPM:{s}      {d}\r\n", .{ seq_green, seq_reset, wpm });
-}
-
-fn getMs() i64 {
-    return Io.Clock.now(.awake, io).toMilliseconds();
 }
 
 var f_writer: Io.File.Writer = undefined;
