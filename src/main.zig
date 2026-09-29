@@ -434,7 +434,7 @@ fn showResult(c: Challenge, time: i64) void {
 
     print("\n\r{s}Accuracy:{s} {d}% (Correct: {d} Mistakes: {d})", .{ seq_green, seq_reset, accuracy, correct, mistakes });
 
-    const wpm: usize = @intCast(60_000 * typed / 5 / @as(u64, @intCast(time)));
+    const wpm: usize = @intCast(60_000 * correct / 5 / @as(u64, @intCast(time)));
 
     print("\n\r{s}WPM:{s}      {d}\r\n", .{ seq_green, seq_reset, wpm });
 }
